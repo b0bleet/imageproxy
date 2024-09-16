@@ -150,7 +150,7 @@ func TestAllowed(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		p := NewProxy(nil, nil)
+		p := NewProxy(nil, nil, nil)
 		p.AllowHosts = tt.allowHosts
 		p.DenyHosts = tt.denyHosts
 		p.SignatureKeys = tt.keys

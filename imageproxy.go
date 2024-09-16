@@ -91,21 +91,27 @@ type Proxy struct {
 	// PassRequestHeaders identifies HTTP headers to pass from inbound
 	// requests to the proxied server.
 	PassRequestHeaders []string
+
+	Storage Cache
 }
 
 // NewProxy constructs a new proxy.  The provided http RoundTripper will be
 // used to fetch remote URLs.  If nil is provided, http.DefaultTransport will
 // be used.
-func NewProxy(transport http.RoundTripper, cache Cache) *Proxy {
+func NewProxy(transport http.RoundTripper, cache Cache, storage Cache) *Proxy {
 	if transport == nil {
 		transport, _ = aia.NewTransport()
 	}
 	if cache == nil {
 		cache = NopCache
 	}
+	if storage == nil {
+		storage = NopCache
+	}
 
 	proxy := &Proxy{
-		Cache: cache,
+		Cache:   cache,
+		Storage: storage,
 	}
 
 	client := new(http.Client)
@@ -168,6 +174,25 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 	if err := p.allowed(req); err != nil {
 		p.logf("%s: %v", err, req)
 		http.Error(w, msgNotAllowed, http.StatusForbidden)
+		return
+	}
+
+	if image, ok := p.Storage.Get(req.String()); ok {
+		// Enable CORS for 3rd party applications
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		// Add a Content-Security-Policy to prevent stored-XSS attacks via SVG files
+		w.Header().Set("Content-Security-Policy", "script-src 'none'")
+
+		// Disable Content-Type sniffing
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
+		// Block potential XSS attacks especially in legacy browsers which do not support CSP
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+
+		w.Header().Set("Content-Length", fmt.Sprint(len(image)))
+
+		w.Write(image)
 		return
 	}
 
@@ -255,6 +280,18 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msgNotAllowed, http.StatusForbidden)
 		return
 	}
+
+	cpb, err := io.ReadAll(resp.Body)
+	if err != nil {
+		msg := fmt.Sprintf("error reading image bytes: %v", err)
+		p.log(msg)
+		http.Error(w, msg, http.StatusInternalServerError)
+		metricRemoteErrors.Inc()
+		return
+	}
+
+	p.Storage.Set(req.String(), cpb)
+
 	w.Header().Set("Content-Type", contentType)
 
 	copyHeader(w.Header(), resp.Header, "Content-Length")

@@ -35,7 +35,7 @@ var allowHosts = flag.String("allowHosts", "", "comma separated list of allowed 
 var denyHosts = flag.String("denyHosts", "", "comma separated list of denied remote hosts")
 var referrers = flag.String("referrers", "", "comma separated list of allowed referring hosts")
 var includeReferer = flag.Bool("includeReferer", false, "include referer header in remote requests")
-var followRedirects = flag.Bool("followRedirects", true, "follow redirects")
+var followRedirects = flag.Bool("followRedirects", false, "follow redirects")
 var baseURL = flag.String("baseURL", "", "default base URL for relative remote URLs")
 var passRequestHeaders = flag.String("passRequestHeaders", "", "comma separatetd list of request headers to pass to remote server")
 var cache tieredCache
@@ -45,6 +45,7 @@ var timeout = flag.Duration("timeout", 0, "time limit for requests served by thi
 var verbose = flag.Bool("verbose", false, "print verbose logging messages")
 var _ = flag.Bool("version", false, "Deprecated: this flag does nothing")
 var contentTypes = flag.String("contentTypes", "image/*", "comma separated list of allowed content types")
+var storage = flag.String("storage", "", "storage to store images")
 var userAgent = flag.String("userAgent", "willnorris/imageproxy", "specify the user-agent used by imageproxy when fetching images from origin website")
 
 func init() {
@@ -56,7 +57,16 @@ func main() {
 	envy.Parse("IMAGEPROXY")
 	flag.Parse()
 
-	p := imageproxy.NewProxy(nil, cache.Cache)
+	if *storage == "" {
+		log.Fatalf("invalid storage credentials")
+	}
+
+	storage, err := s3cache.New(*storage)
+	if err != nil {
+		log.Fatalf("unable to create S3 storage: %v", err)
+	}
+
+	p := imageproxy.NewProxy(nil, cache.Cache, storage)
 	if *allowHosts != "" {
 		p.AllowHosts = strings.Split(*allowHosts, ",")
 	}
