@@ -18,6 +18,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"path"
 	"strings"
@@ -177,25 +178,6 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if image, ok := p.Storage.Get(req.String()); ok {
-		// Enable CORS for 3rd party applications
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		// Add a Content-Security-Policy to prevent stored-XSS attacks via SVG files
-		w.Header().Set("Content-Security-Policy", "script-src 'none'")
-
-		// Disable Content-Type sniffing
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-
-		// Block potential XSS attacks especially in legacy browsers which do not support CSP
-		w.Header().Set("X-XSS-Protection", "1; mode=block")
-
-		w.Header().Set("Content-Length", fmt.Sprint(len(image)))
-
-		w.Write(image)
-		return
-	}
-
 	// assign static settings from proxy to req.Options
 	req.Options.ScaleUp = p.ScaleUp
 
@@ -234,7 +216,13 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 			return http.ErrUseLastResponse
 		}
 	}
-	resp, err := p.Client.Do(actualReq)
+	var resp *http.Response
+	if image, ok := p.Storage.Get(req.String()); ok {
+		b := bytes.NewBuffer(image)
+		resp, err = http.ReadResponse(bufio.NewReader(b), r)
+	} else {
+		resp, err = p.Client.Do(actualReq)
+	}
 
 	if err != nil {
 		msg := fmt.Sprintf("error fetching remote image: %v", err)
@@ -281,7 +269,7 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cpb, err := io.ReadAll(resp.Body)
+	respBytes, err := httputil.DumpResponse(resp, true)
 	if err != nil {
 		msg := fmt.Sprintf("error reading image bytes: %v", err)
 		p.log(msg)
@@ -289,8 +277,7 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		metricRemoteErrors.Inc()
 		return
 	}
-
-	p.Storage.Set(req.String(), cpb)
+	p.Storage.Set(req.String(), respBytes)
 
 	w.Header().Set("Content-Type", contentType)
 
