@@ -65,16 +65,7 @@ func (c *cache) Set(key string, value []byte) {
 	}
 }
 func (c *cache) Delete(key string) {
-	key = path.Join(c.prefix, keyToFilename(key))
-	input := &s3.DeleteObjectInput{
-		Bucket: &c.bucket,
-		Key:    &key,
-	}
-
-	_, err := c.DeleteObject(input)
-	if err != nil {
-		log.Printf("error deleting from s3: %v", err)
-	}
+	log.Printf("invalid delete operation in S3 cache")
 }
 
 func keyToFilename(key string) string {
