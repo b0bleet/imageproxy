@@ -28,6 +28,7 @@ import (
 	"github.com/gregjones/httpcache"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"willnorris.com/go/imageproxy/internal/s3cache"
 	tphttp "willnorris.com/go/imageproxy/third_party/http"
 )
 
@@ -93,21 +94,18 @@ type Proxy struct {
 	// requests to the proxied server.
 	PassRequestHeaders []string
 
-	Storage Cache
+	Storage *s3cache.Cache
 }
 
 // NewProxy constructs a new proxy.  The provided http RoundTripper will be
 // used to fetch remote URLs.  If nil is provided, http.DefaultTransport will
 // be used.
-func NewProxy(transport http.RoundTripper, cache Cache, storage Cache) *Proxy {
+func NewProxy(transport http.RoundTripper, cache Cache, storage *s3cache.Cache) *Proxy {
 	if transport == nil {
 		transport, _ = aia.NewTransport()
 	}
 	if cache == nil {
 		cache = NopCache
-	}
-	if storage == nil {
-		storage = NopCache
 	}
 
 	proxy := &Proxy{
@@ -152,7 +150,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var h http.Handler = http.HandlerFunc(p.serveImage)
+	var h http.Handler
+	if strings.HasPrefix(r.URL.Path, "/file") {
+		h = http.HandlerFunc(p.serveFile)
+	} else {
+		h = http.HandlerFunc(p.serveImage)
+	}
+
 	if p.Timeout > 0 {
 		h = tphttp.TimeoutHandler(h, p.Timeout, "Gateway timeout waiting for remote resource.")
 	}
@@ -160,6 +164,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	timer := prometheus.NewTimer(metricRequestDuration)
 	defer timer.ObserveDuration()
 	h.ServeHTTP(w, r)
+}
+
+func (p *Proxy) serveFile(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.EscapedPath()[1:], "file/")
+	image, ok := p.Storage.GetRaw(path)
+	if !ok {
+		msg := fmt.Sprintf("invalid image filename: %v", path)
+		p.log(msg)
+		http.Error(w, msg, http.StatusInternalServerError)
+		metricRemoteErrors.Inc()
+		return
+	}
+
+	b := bytes.NewBuffer(image)
+	resp := bufio.NewReader(b)
+	if _, err := io.Copy(w, resp); err != nil {
+		p.logf("error copying response: %v", err)
+	}
 }
 
 // serveImage handles incoming requests for proxied images.

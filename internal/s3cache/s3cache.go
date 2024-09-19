@@ -1,8 +1,8 @@
 // Copyright 2013 The imageproxy authors.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package s3cache provides an httpcache.Cache implementation that stores
-// cached values on Amazon S3.
+// Package s3Cache provides an httpCache.Cache implementation that stores
+// Cached values on Amazon S3.
 package s3cache
 
 import (
@@ -22,13 +22,16 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 )
 
-type cache struct {
+type Cache struct {
 	*s3.S3
 	bucket, prefix string
 }
 
-func (c *cache) Get(key string) ([]byte, bool) {
+func (c *Cache) Get(key string) ([]byte, bool) {
 	key = path.Join(c.prefix, keyToFilename(key))
+	return c.GetRaw(key)
+}
+func (c *Cache) GetRaw(key string) ([]byte, bool) {
 	input := &s3.GetObjectInput{
 		Bucket: &c.bucket,
 		Key:    &key,
@@ -51,7 +54,7 @@ func (c *cache) Get(key string) ([]byte, bool) {
 
 	return value, true
 }
-func (c *cache) Set(key string, value []byte) {
+func (c *Cache) Set(key string, value []byte) {
 	key = path.Join(c.prefix, keyToFilename(key))
 	input := &s3.PutObjectInput{
 		Body:   aws.ReadSeekCloser(bytes.NewReader(value)),
@@ -64,8 +67,8 @@ func (c *cache) Set(key string, value []byte) {
 		log.Printf("error writing to s3: %v", err)
 	}
 }
-func (c *cache) Delete(key string) {
-	log.Printf("invalid delete operation in S3 cache")
+func (c *Cache) Delete(key string) {
+	log.Printf("invalid delete operation in S3 Cache")
 }
 
 func keyToFilename(key string) string {
@@ -74,11 +77,11 @@ func keyToFilename(key string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// New constructs a cache configured using the provided URL string.  URL should
+// New constructs a Cache configured using the provided URL string.  URL should
 // be of the form: "s3://region/bucket/optional-path-prefix".  Credentials
 // should be specified using one of the mechanisms supported by aws-sdk-go (see
 // https://docs.aws.amazon.com/sdk-for-go/api/aws/session/).
-func New(s string) (*cache, error) {
+func New(s string) (*Cache, error) {
 	u, err := url.Parse(s)
 	if err != nil {
 		return nil, err
@@ -111,7 +114,7 @@ func New(s string) (*cache, error) {
 		return nil, err
 	}
 
-	return &cache{
+	return &Cache{
 		S3:     s3.New(sess),
 		bucket: bucket,
 		prefix: prefix,
