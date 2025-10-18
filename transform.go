@@ -5,6 +5,7 @@ package imageproxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif" // register gif format
@@ -41,6 +42,19 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 	if !opt.transform() {
 		// bail if no transformation was requested
 		return img, nil
+	}
+
+	// decode image metadata
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(img))
+	if err != nil {
+		return nil, err
+	}
+
+	// prevent pixel flooding attacks
+	// accept no larger than a 100 megapixel image.
+	const maxPixels = 100_000_000
+	if cfg.Width*cfg.Height > maxPixels {
+		return nil, errors.New("image too large")
 	}
 
 	// decode image
@@ -198,14 +212,8 @@ func cropParams(m image.Image, opt Options) image.Rectangle {
 	}
 
 	// bottom right coordinate of crop
-	x1 := x0 + w
-	if x1 > imgW {
-		x1 = imgW
-	}
-	y1 := y0 + h
-	if y1 > imgH {
-		y1 = imgH
-	}
+	x1 := min(x0+w, imgW)
+	y1 := min(y0+h, imgH)
 
 	return image.Rect(x0, y0, x1, y1)
 }
@@ -267,6 +275,11 @@ func transformImage(m image.Image, opt Options) image.Image {
 	timer := prometheus.NewTimer(metricTransformationDuration)
 	defer timer.ObserveDuration()
 
+	// trim
+	if opt.Trim {
+		m = trimEdges(m)
+	}
+
 	// Parse crop and resize parameters before applying any transforms.
 	// This is to ensure that any percentage-based values are based off the
 	// size of the original image.
@@ -310,4 +323,42 @@ func transformImage(m image.Image, opt Options) image.Image {
 	}
 
 	return m
+}
+
+// trimEdges returns a new image with solid color borders of the image removed.
+// The pixel at the top left corner is used to match the border color.
+func trimEdges(img image.Image) image.Image {
+	bounds := img.Bounds()
+	minX, minY, maxX, maxY := bounds.Max.X, bounds.Max.Y, bounds.Min.X, bounds.Min.Y
+
+	// Get the color of the first pixel (top-left corner)
+	baseColor := img.At(bounds.Min.X, bounds.Min.Y)
+
+	// Check each pixel and find the bounding box of non-matching pixels
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if img.At(x, y) != baseColor { // Non-matching pixel
+				if x < minX {
+					minX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if x > maxX {
+					maxX = x
+				}
+				if y > maxY {
+					maxY = y
+				}
+			}
+		}
+	}
+
+	// If no non-matching pixels are found, return the original image
+	if minX >= maxX || minY >= maxY {
+		return img
+	}
+
+	// Crop the image to the bounding box of non-matching pixels
+	return imaging.Crop(img, image.Rect(minX, minY, maxX+1, maxY+1))
 }

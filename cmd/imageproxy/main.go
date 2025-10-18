@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -30,7 +31,7 @@ import (
 
 const defaultMemorySize = 100
 
-var addr = flag.String("addr", "localhost:8080", "TCP address to listen on")
+var addr = flag.String("addr", "localhost:8080", "address to listen on, either a TCP address or a Unix domain socket path prefixed with unix:")
 var allowHosts = flag.String("allowHosts", "", "comma separated list of allowed remote hosts")
 var denyHosts = flag.String("denyHosts", "", "comma separated list of denied remote hosts")
 var referrers = flag.String("referrers", "", "comma separated list of allowed referring hosts")
@@ -38,6 +39,7 @@ var includeReferer = flag.Bool("includeReferer", false, "include referer header 
 var followRedirects = flag.Bool("followRedirects", false, "follow redirects")
 var baseURL = flag.String("baseURL", "", "default base URL for relative remote URLs")
 var passRequestHeaders = flag.String("passRequestHeaders", "", "comma separatetd list of request headers to pass to remote server")
+var passResponseHeaders = flag.String("passResponseHeaders", "Cache-Control,Last-Modified,Expires,Etag,Link", "comma separated list of response headers to pass from remote server")
 var cache tieredCache
 var signatureKeys signatureKeyList
 var scaleUp = flag.Bool("scaleUp", false, "allow images to scale beyond their original dimensions")
@@ -47,6 +49,8 @@ var _ = flag.Bool("version", false, "Deprecated: this flag does nothing")
 var contentTypes = flag.String("contentTypes", "image/*", "comma separated list of allowed content types")
 var storage = flag.String("storage", "", "storage to store images")
 var userAgent = flag.String("userAgent", "willnorris/imageproxy", "specify the user-agent used by imageproxy when fetching images from origin website")
+var minCacheDuration = flag.Duration("minCacheDuration", 0, "minimum duration to cache remote images")
+var forceCache = flag.Bool("forceCache", false, "Ignore no-store and private directives in responses")
 
 func init() {
 	flag.Var(&cache, "cache", "location to cache images (see https://github.com/willnorris/imageproxy#cache)")
@@ -82,6 +86,12 @@ func main() {
 	if *passRequestHeaders != "" {
 		p.PassRequestHeaders = strings.Split(*passRequestHeaders, ",")
 	}
+	if *passResponseHeaders != "" {
+		p.PassResponseHeaders = strings.Split(*passResponseHeaders, ",")
+	} else {
+		// set to a non-nil empty slice to pass no headers.
+		p.PassResponseHeaders = []string{}
+	}
 	p.SignatureKeys = signatureKeys
 	if *baseURL != "" {
 		var err error
@@ -97,6 +107,20 @@ func main() {
 	p.ScaleUp = *scaleUp
 	p.Verbose = *verbose
 	p.UserAgent = *userAgent
+	p.MinimumCacheDuration = *minCacheDuration
+	p.ForceCache = *forceCache
+
+	var ln net.Listener
+	var err error
+
+	if path, ok := strings.CutPrefix(*addr, "unix:"); ok {
+		ln, err = net.Listen("unix", path)
+	} else {
+		ln, err = net.Listen("tcp", *addr)
+	}
+	if err != nil {
+		log.Fatalf("listen failed: %v", err)
+	}
 
 	server := &http.Server{
 		Addr:    *addr,
@@ -107,8 +131,8 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	fmt.Printf("imageproxy listening on %s\n", server.Addr)
-	log.Fatal(server.ListenAndServe())
+	fmt.Printf("imageproxy listening on %s\n", *addr)
+	log.Fatal(server.Serve(ln))
 }
 
 type signatureKeyList [][]byte

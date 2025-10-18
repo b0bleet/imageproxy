@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 )
 
 var emptyOptions = Options{}
@@ -25,8 +26,8 @@ func TestOptions_String(t *testing.T) {
 			"1x2,fh,fit,fv,q80,r90",
 		},
 		{
-			Options{Width: 0.15, Height: 1.3, Rotate: 45, Quality: 95, Signature: "c0ffee", Format: "png"},
-			"0.15x1.3,png,q95,r45,sc0ffee",
+			Options{Width: 0.15, Height: 1.3, Rotate: 45, Quality: 95, Signature: "c0ffee", Format: "png", ValidUntil: time.Unix(123, 0)},
+			"0.15x1.3,png,q95,r45,sc0ffee,vu123",
 		},
 		{
 			Options{Width: 0.15, Height: 1.3, CropX: 100, CropY: 200},
@@ -86,7 +87,7 @@ func TestParseOptions(t *testing.T) {
 		// flags, in different orders
 		{"q70,1x2,fit,r90,fv,fh,sc0ffee,png", Options{Width: 1, Height: 2, Fit: true, Rotate: 90, FlipVertical: true, FlipHorizontal: true, Quality: 70, Signature: "c0ffee", Format: "png"}},
 		{"r90,fh,sc0ffee,png,q90,1x2,fv,fit", Options{Width: 1, Height: 2, Fit: true, Rotate: 90, FlipVertical: true, FlipHorizontal: true, Quality: 90, Signature: "c0ffee", Format: "png"}},
-		{"cx100,cw300,1x2,cy200,ch400,sc,scaleUp", Options{Width: 1, Height: 2, ScaleUp: true, CropX: 100, CropY: 200, CropWidth: 300, CropHeight: 400, SmartCrop: true}},
+		{"cx100,cw300,1x2,cy200,ch400,sc,scaleUp,vu1234567890", Options{Width: 1, Height: 2, ScaleUp: true, CropX: 100, CropY: 200, CropWidth: 300, CropHeight: 400, SmartCrop: true, ValidUntil: time.Unix(1234567890, 0)}},
 	}
 
 	for _, tt := range tests {
@@ -152,9 +153,67 @@ func TestNewRequest(t *testing.T) {
 			"http://localhost/http:///example.com/foo",
 			"http://example.com/foo", emptyOptions, false,
 		},
+		// base64 encoded paths
+		{
+			"http://localhost/aHR0cDovL2V4YW1wbGUuY29tL2Zvbw",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost//aHR0cDovL2V4YW1wbGUuY29tL2Zvbw",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost/x/aHR0cDovL2V4YW1wbGUuY29tL2Zvbw",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost/x/aHR0cHM6Ly9leGFtcGxlLmNvbS9mb28_YmFy",
+			"https://example.com/foo?bar", emptyOptions, false,
+		},
+		{
+			"http://localhost/x/aHR0cHM6Ly9leGFtcGxlLmNvbS9mb28_YmFy?baz",
+			"https://example.com/foo?bar", emptyOptions, false,
+		},
 		{ // escaped path
 			"http://localhost/http://example.com/%2C",
 			"http://example.com/%2C", emptyOptions, false,
+		},
+		// percent encoded cases
+		{
+			"http://localhost/1x2/http%3A%2F%2Fexample.com%2Ffoo",
+			"http://example.com/foo", Options{Width: 1, Height: 2}, false,
+		},
+		{
+			"http://localhost/1x2/http%3A%2F%2Fexample.com%2Fhttp%2Fstuff",
+			"http://example.com/http/stuff", Options{Width: 1, Height: 2}, false,
+		},
+		{
+			"http://localhost/http%3A%2F%2Fexample.com%2Ffoo",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost/HTTP%3a%2f%2fexample.com%2Ffoo",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost/http%3A%2Fexample.com%2Ffoo",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost/http%3A%2F%2F%2Fexample.com%2Ffoo",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost//http%3A%2F%2Fexample.com%2Ffoo",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost/http%3A%2F%2Fexample.com%2Ffoo%3Ftest%3D1%26test%3D2",
+			"http://example.com/foo?test=1&test=2", emptyOptions, false,
+		},
+		{
+			"http://localhost/1x2/http%3A%2F%2Fexample.com%2Ffoo%3Ftest%3D1%26test%3D2",
+			"http://example.com/foo?test=1&test=2", Options{Width: 1, Height: 2}, false,
 		},
 	}
 
@@ -186,16 +245,31 @@ func TestNewRequest(t *testing.T) {
 }
 
 func TestNewRequest_BaseURL(t *testing.T) {
-	req, _ := http.NewRequest("GET", "/x/path", nil)
 	base, _ := url.Parse("https://example.com/")
 
-	r, err := NewRequest(req, base)
-	if err != nil {
-		t.Errorf("NewRequest(%v, %v) returned unexpected error: %v", req, base, err)
+	tests := []struct {
+		path string
+		want string
+	}{
+		{
+			path: "/x/path",
+			want: "https://example.com/path#0x0",
+		},
+		{ // Chinese characters 已然
+			path: "/x/5bey54S2",
+			want: "https://example.com/%E5%B7%B2%E7%84%B6#0x0",
+		},
 	}
 
-	want := "https://example.com/path#0x0"
-	if got := r.String(); got != want {
-		t.Errorf("NewRequest(%v, %v) returned %q, want %q", req, base, got, want)
+	for _, tt := range tests {
+		req, _ := http.NewRequest("GET", tt.path, nil)
+		r, err := NewRequest(req, base)
+		if err != nil {
+			t.Errorf("NewRequest(%v, %v) returned unexpected error: %v", req, base, err)
+		}
+
+		if got := r.String(); got != tt.want {
+			t.Errorf("NewRequest(%v, %v) returned %q, want %q", req, base, got, tt.want)
+		}
 	}
 }

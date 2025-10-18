@@ -4,6 +4,7 @@
 package imageproxy
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 )
 
 const (
@@ -30,6 +33,8 @@ const (
 	optCropWidth       = "cw"
 	optCropHeight      = "ch"
 	optSmartCrop       = "sc"
+	optTrim            = "trim"
+	optValidUntil      = "vu"
 )
 
 // URLError reports a malformed URL error.
@@ -80,6 +85,12 @@ type Options struct {
 
 	// Automatically find good crop points based on image content.
 	SmartCrop bool
+
+	// If true, automatically trim pixels of the same color around the edges
+	Trim bool
+
+	// If non-zero, the URL is valid until this time.
+	ValidUntil time.Time
 }
 
 func (o Options) String() string {
@@ -123,7 +134,15 @@ func (o Options) String() string {
 	if o.SmartCrop {
 		opts = append(opts, optSmartCrop)
 	}
+	if o.Trim {
+		opts = append(opts, optTrim)
+	}
+	if !o.ValidUntil.IsZero() {
+		opts = append(opts, fmt.Sprintf("%s%d", optValidUntil, o.ValidUntil.Unix()))
+	}
+
 	sort.Strings(opts)
+
 	return strings.Join(opts, ",")
 }
 
@@ -132,7 +151,7 @@ func (o Options) String() string {
 // the presence of other fields (like Fit).  A non-empty Format value is
 // assumed to involve a transformation.
 func (o Options) transform() bool {
-	return o.Width != 0 || o.Height != 0 || o.Rotate != 0 || o.FlipHorizontal || o.FlipVertical || o.Quality != 0 || o.Format != "" || o.CropX != 0 || o.CropY != 0 || o.CropWidth != 0 || o.CropHeight != 0
+	return o.Width != 0 || o.Height != 0 || o.Rotate != 0 || o.FlipHorizontal || o.FlipVertical || o.Quality != 0 || o.Format != "" || o.CropX != 0 || o.CropY != 0 || o.CropWidth != 0 || o.CropHeight != 0 || o.Trim
 }
 
 // ParseOptions parses str as a list of comma separated transformation options.
@@ -207,7 +226,7 @@ func (o Options) transform() bool {
 //
 // # Format
 //
-// The "jpeg", "png", and "tiff"  options can be used to specify the desired
+// The "jpeg", "png", and "tiff" options can be used to specify the desired
 // image format of the proxied image.
 //
 // # Signature
@@ -218,6 +237,18 @@ func (o Options) transform() bool {
 //
 // See https://github.com/willnorris/imageproxy/blob/master/docs/url-signing.md
 // for examples of generating signatures.
+//
+// # Trim
+//
+// The "trim" option will automatically trim pixels of the same color around
+// the edges of the image.  This is useful for removing borders from images
+// that have been resized or cropped.  The trim option is applied before other
+// options such as cropping or resizing.
+//
+// # Valid Until
+//
+// The "vu{unixtime}" option specifies a Unix timestamp at which the request URL is no longer valid.
+// For example, "vu1800000000" would mean the URL is valid until 2027-01-15T08:00:00Z.
 //
 // Examples
 //
@@ -251,6 +282,8 @@ func ParseOptions(str string) Options {
 			options.Format = opt
 		case opt == optSmartCrop:
 			options.SmartCrop = true
+		case opt == optTrim:
+			options.Trim = true
 		case strings.HasPrefix(opt, optRotatePrefix):
 			value := strings.TrimPrefix(opt, optRotatePrefix)
 			options.Rotate, _ = strconv.Atoi(value)
@@ -271,6 +304,11 @@ func ParseOptions(str string) Options {
 		case strings.HasPrefix(opt, optCropHeight):
 			value := strings.TrimPrefix(opt, optCropHeight)
 			options.CropHeight, _ = strconv.ParseFloat(value, 64)
+		case strings.HasPrefix(opt, optValidUntil):
+			value := strings.TrimPrefix(opt, optValidUntil)
+			if v, _ := strconv.ParseInt(value, 10, 64); v > 0 {
+				options.ValidUntil = time.Unix(v, 0)
+			}
 		case strings.Contains(opt, optSizeDelimiter):
 			size := strings.SplitN(opt, optSizeDelimiter, 2)
 			if w := size[0]; w != "" {
@@ -309,8 +347,23 @@ func (r Request) String() string {
 // NewRequest parses an http.Request into an imageproxy Request.  Options and
 // the remote image URL are specified in the request path, formatted as:
 // /{options}/{remote_url}.  Options may be omitted, so a request path may
-// simply contain /{remote_url}.  The remote URL must be an absolute "http" or
-// "https" URL, should not be URL encoded, and may contain a query string.
+// simply contain /{remote_url}.
+//
+// The remote URL may be included in plain text without any encoding,
+// percent-encoded (aka URL encoded), or base64 encoded (URL safe, no padding).
+//
+// When no encoding is used, any URL query string is treated as part of the remote URL.
+// For example, given the proxy URL of `http://localhost/x/http://example.com/?id=1`,
+// the remote URL is `http://example.com/?id=1`.
+//
+// When percent-encoding is used, the full URL must be encoded.
+// Any query string on the proxy URL is NOT included as part of the remote URL.
+// Percent-encoded URLs must be absolute URLs;
+// they cannot be relative URLs used with a default base URL.
+//
+// When base64 encoding is used, the full URL must be encoded.
+// Any query string on the proxy URL is NOT included as part of the remote URL.
+// Base64 encoded URLs may be relative URLs used with a default base URL.
 //
 // Assuming an imageproxy server running on localhost, the following are all
 // valid imageproxy requests:
@@ -319,12 +372,15 @@ func (r Request) String() string {
 //	http://localhost/100x200,r90/http://example.com/image.jpg?foo=bar
 //	http://localhost//http://example.com/image.jpg
 //	http://localhost/http://example.com/image.jpg
+//	http://localhost/x/http%3A%2F%2Fexample.com%2Fimage.jpg
+//	http://localhost/100x200/aHR0cDovL2V4YW1wbGUuY29tL2ltYWdlLmpwZw
 func NewRequest(r *http.Request, baseURL *url.URL) (*Request, error) {
 	var err error
 	req := &Request{Original: r}
+	var enc bool // whether the remote URL was base64 or URL encoded
 
 	path := r.URL.EscapedPath()[1:] // strip leading slash
-	req.URL, err = parseURL(path)
+	req.URL, enc, err = parseURL(path, baseURL)
 	if err != nil || !req.URL.IsAbs() {
 		// first segment should be options
 		parts := strings.SplitN(path, "/", 2)
@@ -333,7 +389,7 @@ func NewRequest(r *http.Request, baseURL *url.URL) (*Request, error) {
 		}
 
 		var err error
-		req.URL, err = parseURL(parts[1])
+		req.URL, enc, err = parseURL(parts[1], baseURL)
 		if err != nil {
 			return nil, URLError{fmt.Sprintf("unable to parse remote URL: %v", err), r.URL}
 		}
@@ -353,16 +409,47 @@ func NewRequest(r *http.Request, baseURL *url.URL) (*Request, error) {
 		return nil, URLError{"remote URL must have http or https scheme", r.URL}
 	}
 
-	// query string is always part of the remote URL
-	req.URL.RawQuery = r.URL.RawQuery
+	if !enc {
+		// if the remote URL was not base64 or URL encoded,
+		// then the query string is part of the remote URL
+		req.URL.RawQuery = r.URL.RawQuery
+	}
 	return req, nil
 }
 
 var reCleanedURL = regexp.MustCompile(`^(https?):/+([^/])`)
+var reIsEncodedURL = regexp.MustCompile(`^(?i)https?%3A%2F`)
 
 // parseURL parses s as a URL, handling URLs that have been munged by
 // path.Clean or a webserver that collapses multiple slashes.
-func parseURL(s string) (*url.URL, error) {
+// The returned enc bool indicates whether the remote URL was encoded.
+func parseURL(s string, baseURL *url.URL) (_ *url.URL, enc bool, _ error) {
+	// Try to base64 decode the string. If it is not base64 encoded,
+	// this will fail quickly on the first invalid character like ":", ".", or "/".
+	// Accept the decoded string if it looks like an absolute HTTP URL,
+	// or if we have a baseURL and the decoded string did not contain invalid code points.
+	// This allows for values like "/path", which do successfully base64 decode,
+	// but not to valid code points, to be treated as an unencoded string.
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
+		d := string(b)
+		if strings.HasPrefix(d, "http://") || strings.HasPrefix(d, "https://") {
+			enc = true
+			s = d
+		} else if baseURL != nil && !strings.ContainsRune(d, unicode.ReplacementChar) {
+			enc = true
+			s = d
+		}
+	}
+
+	// If the string looks like a URL encoded absolute HTTP(S) URL, decode it.
+	if reIsEncodedURL.MatchString(s) {
+		if u, err := url.PathUnescape(s); err == nil {
+			enc = true
+			s = u
+		}
+	}
+
 	s = reCleanedURL.ReplaceAllString(s, "$1://$2")
-	return url.Parse(s)
+	u, err := url.Parse(s)
+	return u, enc, err
 }

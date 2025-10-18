@@ -41,18 +41,28 @@ list of parameters, which can be supplied in any order. Duplicate parameters
 overwrite previous values.
 
 See the full list of available options at
-<https://godoc.org/willnorris.com/go/imageproxy#ParseOptions>.
+<https://pkg.go.dev/willnorris.com/go/imageproxy#ParseOptions>.
 
 ### Remote URL
 
 The URL of the original image to load is specified as the remainder of the
-path, without any encoding. For example,
-`http://localhost/200/https://willnorris.com/logo.jpg`.
+path. It may be included in plain text without any encoding,
+percent-encoded (aka URL encoded), or base64 encoded (URL safe, no padding).
 
-In order to [optimize caching][], it is recommended that URLs not contain query
-strings.
+When no encoding is used, any URL query string is treated as part of the remote URL.
+For example, given the proxy URL of `http://localhost/x/http://example.com/?id=1`,
+the remote URL is `http://example.com/?id=1`.
 
-[optimize caching]: http://www.stevesouders.com/blog/2008/08/23/revving-filenames-dont-use-querystring/
+When percent-encoding is used, the full URL must be encoded.
+Any query string on the proxy URL is NOT included as part of the remote URL.
+Percent-encoded URLs must be absolute URLs;
+they cannot be relative URLs used with a default base URL.
+For example, `http://localhost/x/http%3A%2F%2Fexample.com%2F%3Fid%3D1`.
+
+When base64 encoding is used, the full URL must be encoded.
+Any query string on the proxy URL is NOT included as part of the remote URL.
+Base64 encoded URLs may be relative URLs used with a default base URL.
+For example, `http://localhost/x/aHR0cDovL2V4YW1wbGUuY29tLz9pZD0x`.
 
 ### Examples
 
@@ -74,7 +84,7 @@ source image][small-things], which measures 1024 by 678 pixels.
 | 200x,png               | 200px wide, converted to PNG format                        | <a href="https://willnorris.com/api/imageproxy/200x,png/https://willnorris.com/images/imageproxy/small-things.jpg"><img src="https://willnorris.com/api/imageproxy/200x,png/https://willnorris.com/images/imageproxy/small-things.jpg" alt="200x,png"></a>                                           |
 | cx175,cw400,ch300,100x | crop to 400x300px starting at (175,0), scale to 100px wide | <a href="https://willnorris.com/api/imageproxy/cx175,cw400,ch300,100x/https://willnorris.com/images/imageproxy/small-things.jpg"><img src="https://willnorris.com/api/imageproxy/cx175,cw400,ch300,100x/https://willnorris.com/images/imageproxy/small-things.jpg" alt="cx175,cw400,ch300,100x"></a> |
 
-The [smart crop feature](https://godoc.org/willnorris.com/go/imageproxy#hdr-Smart_Crop)
+The [smart crop feature](https://pkg.go.dev/willnorris.com/go/imageproxy#hdr-Smart_Crop-ParseOptions)
 can best be seen by comparing crops of [this source image][judah-sheets], with
 and without smart crop enabled.
 
@@ -96,12 +106,16 @@ image][material-animation] resized to 200px square and rotated 270 degrees:
 
 Install the package using:
 
-    go install willnorris.com/go/imageproxy/cmd/imageproxy@latest
+```sh
+go install willnorris.com/go/imageproxy/cmd/imageproxy@latest
+```
 
 Once installed, ensure `$GOPATH/bin` is in your `$PATH`, then run the proxy
 using:
 
-    imageproxy
+```sh
+imageproxy
+```
 
 This will start the proxy on port 8080, without any caching and with no allowed
 host list (meaning any remote URL can be proxied). Test this by navigating to
@@ -139,12 +153,16 @@ enabled using the `-cache` flag. It supports the following values:
   For example, when working with [minio](https://minio.io), which doesn't use
   regions, provide a dummy region value and custom endpoint value:
 
-      s3://fake-region/bucket/folder?endpoint=minio:9000&disableSSL=1&s3ForcePathStyle=1
+  ```
+  s3://fake-region/bucket/folder?endpoint=minio:9000&disableSSL=1&s3ForcePathStyle=1
+  ```
 
   Similarly, for [Digital Ocean Spaces](https://www.digitalocean.com/products/spaces/),
   provide a dummy region value and the appropriate endpoint for your space:
 
-      s3://fake-region/bucket/folder?endpoint=sfo2.digitaloceanspaces.com
+  ```
+  s3://fake-region/bucket/folder?endpoint=sfo2.digitaloceanspaces.com
+  ```
 
   [aws-options]: https://docs.aws.amazon.com/sdk-for-go/api/aws/#Config
 
@@ -163,7 +181,9 @@ enabled using the `-cache` flag. It supports the following values:
 
 For example, to cache files on disk in the `/tmp/imageproxy` directory:
 
-    imageproxy -cache /tmp/imageproxy
+```sh
+imageproxy -cache /tmp/imageproxy
+```
 
 Reload the [codercat URL][], and then inspect the contents of
 `/tmp/imageproxy`. Within the subdirectories, there should be two files, one
@@ -178,9 +198,29 @@ fashion][]. Typically this is used to put a smaller and faster in-memory cache
 in front of a larger but slower on-disk cache. For example, the following will
 first check an in-memory cache for an image, followed by a gcs bucket:
 
-    imageproxy -cache memory -cache gcs://my-bucket/
+```sh
+imageproxy -cache memory -cache gcs://my-bucket/
+```
 
-[tiered fashion]: https://godoc.org/github.com/die-net/lrucache/twotier
+[tiered fashion]: https://pkg.go.dev/github.com/die-net/lrucache/twotier
+
+#### Override Cache Directives
+
+By default, imageproxy will respect the caching directives in response headers,
+including the cache duration and explicit instructions **not** to cache the response,
+such as `no-store` and `private` cache-control directives.
+
+You can force imageproxy to cache responses, even if they explicitly say not to,
+by passing the `-forceCache` flag. Note that this is generally not recommended.
+
+A minimum cache duration can be set using the `-minCacheDuration` flag. This
+will extend the cache duration if the response header indicates a shorter value.
+If called without the `-forceCache` flag, this will have no effect on responses
+with the `no-store` or `private` directives.
+
+```sh
+imageproxy -cache /tmp/imageproxy -minCacheDuration 5m
+```
 
 ### Allowed Referrer List
 
@@ -188,7 +228,9 @@ You can limit images to only be accessible for certain hosts in the HTTP
 referrer header, which can help prevent others from hotlinking to images. It can
 be enabled by running:
 
-    imageproxy  -referrers example.com
+```sh
+imageproxy  -referrers example.com
+```
 
 Reload the [codercat URL][], and you should now get an error message. You can
 specify multiple hosts as a comma separated list, or prefix a host value with
@@ -203,12 +245,16 @@ if you want to support fetching from any host, leave off these flags.
 
 Try it out by running:
 
-    imageproxy -allowHosts example.com
+```sh
+imageproxy -allowHosts example.com
+```
 
 Reload the [codercat URL][], and you should now get an error message.
 Alternately, try running:
 
-    imageproxy -denyHosts octodex.github.com
+```sh
+imageproxy -denyHosts octodex.github.com
+```
 
 Reloading the [codercat URL][] will still return an error message.
 
@@ -234,7 +280,9 @@ is useful in preventing abuse when you don't have just a static list of hosts
 you want to allow. Signatures are generated using HMAC-SHA256 against the
 remote URL, and url-safe base64 encoding the result:
 
-    base64urlencode(hmac.New(sha256, <key>).digest(<remote_url>))
+```
+base64urlencode(hmac.New(sha256, <key>).digest(<remote_url>))
+```
 
 The HMAC key is specified using the `signatureKey` flag. If this flag
 begins with an "@", the remainder of the value is interpreted as a file on disk
@@ -242,14 +290,16 @@ which contains the HMAC key.
 
 Try it out by running:
 
-    imageproxy -signatureKey "secretkey"
+```sh
+imageproxy -signatureKey "secretkey"
+```
 
 Reload the [codercat URL][], and you should see an error message. Now load a
 [signed codercat URL][] (which contains the [signature option][]) and verify
 that it loads properly.
 
 [signed codercat URL]: http://localhost:8080/500,sXyMwWKIC5JPCtlYOQ2f4yMBTqpjtUsfI67Sp7huXIYY=/https://octodex.github.com/images/codercat.jpg
-[signature option]: https://godoc.org/willnorris.com/go/imageproxy#hdr-Signature
+[signature option]: https://pkg.go.dev/willnorris.com/go/imageproxy#hdr-Signature-ParseOptions
 
 Some simple code samples for generating signatures in various languages can be
 found in [docs/url-signing.md](/docs/url-signing.md). Multiple valid signature
@@ -262,6 +312,14 @@ If both a whiltelist and signatureKey are specified, requests can match either.
 In other words, requests that match one of the allowed hosts don't necessarily
 need to be signed, though they can be.
 
+To limit how long a URL is valid (particularly useful for signed URLs),
+you can specify a "valid until" time using the `vu` option with a Unix timestamp.
+For example, the following signed URL would only be valid until 2020-01-01:
+
+```
+http://localhost:8080/vu1577836800,sjNcVf6LxzKEvR6Owgg3zhEMN7xbWxlpf-eyYbRfFK4A=/https://example.com/image
+```
+
 ### Default Base URL
 
 Typically, remote images to be proxied are specified as absolute URLs.
@@ -269,7 +327,9 @@ However, if you commonly proxy images from a single source, you can provide a
 base URL and then specify remote images relative to that base. Try it out by
 running:
 
-    imageproxy -baseURL https://octodex.github.com/
+```sh
+imageproxy -baseURL https://octodex.github.com/
+```
 
 Then load the codercat image, specified as a URL relative to that base:
 <http://localhost:8080/500/images/codercat.jpg>. Note that this is not an
@@ -282,7 +342,9 @@ specified, you can always provide the absolute URL of the image to be proxied.
 By default, the imageproxy won't scale images beyond their original size.
 However, you can use the `scaleUp` command-line flag to allow this to happen:
 
-    imageproxy -scaleUp true
+```sh
+imageproxy -scaleUp true
+```
 
 ### WebP and TIFF support
 
@@ -308,7 +370,9 @@ needs... it's a very simple command.
 All configuration flags have equivalent environment variables of the form
 `IMAGEPROXY_$NAME`. For example, an on-disk cache could be configured by calling
 
-    IMAGEPROXY_CACHE="/tmp/imageproxy" imageproxy
+```sh
+IMAGEPROXY_CACHE="/tmp/imageproxy" imageproxy
+```
 
 ## Deploying
 
@@ -341,13 +405,13 @@ A docker image is available at [`ghcr.io/willnorris/imageproxy`](https://github.
 
 You can run it by
 
-```
+```sh
 docker run -p 8080:8080 ghcr.io/willnorris/imageproxy -addr 0.0.0.0:8080
 ```
 
 Or in your Dockerfile:
 
-```
+```Dockerfile
 ENTRYPOINT ["/app/imageproxy", "-addr 0.0.0.0:8080"]
 ```
 
@@ -360,28 +424,62 @@ Note that all configuration options can be set using [environment
 variables](#environment-variables), which is often the preferred approach for
 containers.
 
+### Caddy
+
+You can proxy requests to imageproxy in your Caddy config using the `reverse_proxy` directive:
+
+```Caddyfile
+@imageproxy path /api/imageproxy/*
+handle @imageproxy {
+  uri replace /api/imageproxy/ /
+  reverse_proxy http://localhost:4593
+}
+```
+
+You can also run an instance of imageproxy embedded in Caddy using the [caddy module](./caddy/).
+This requires a custom build of Caddy with the imageproxy module included
+([example](https://github.com/willnorris/willnorris.com/blob/main/cmd/caddy/caddy.go)),
+and configuring it with the `imageproxy` directive in your Caddyfile:
+
+```Caddyfile
+@imageproxy path /api/imageproxy/*
+handle @imageproxy {
+  uri replace /api/imageproxy/ /
+
+  imageproxy {
+    cache /data/imageproxy-cache
+    default_base_url {$IMAGEPROXY_BASEURL}
+    allow_hosts {$IMAGEPROXY_ALLOWHOSTS}
+    signature_key {$IMAGEPROXY_SIGNATUREKEY}
+  }
+}
+```
+
 ### nginx
 
 Use the `proxy_pass` directive to send requests to your imageproxy instance.
 For example, to run imageproxy at the path "/api/imageproxy/", set:
 
-```
-  location /api/imageproxy/ {
-    proxy_pass http://localhost:4593/;
-  }
+```nginx
+location /api/imageproxy/ {
+  proxy_pass http://localhost:4593/;
+}
 ```
 
 Depending on other directives you may have in your nginx config, you might need
 to alter the precedence order by setting:
 
-```
-  location ^~ /api/imageproxy/ {
-    proxy_pass http://localhost:4593/;
-  }
+```nginx
+location ^~ /api/imageproxy/ {
+  proxy_pass http://localhost:4593/;
+}
 ```
 
 ## Clients
 
+- [Hugo partial](https://github.com/willnorris/willnorris.com/blob/main/layouts/partials/imageproxy-url.html)
+  (I use this with an [`{{<img>}}` shortcode](https://github.com/willnorris/willnorris.com/blob/main/layouts/shortcodes/img.html)
+  like [this example](https://github.com/willnorris/willnorris.com/blob/b7f3451/content/about/index.md?plain=1#L7))
 - [Ruby](https://github.com/azolf/imageproxy_ruby)
 
 ## License

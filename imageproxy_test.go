@@ -12,6 +12,7 @@ import (
 	"image"
 	"image/png"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,6 +22,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/die-net/lrucache"
+	"github.com/google/uuid"
+	"github.com/gregjones/httpcache"
 )
 
 func TestPeekContentType(t *testing.T) {
@@ -87,7 +93,7 @@ func TestCopyHeader(t *testing.T) {
 }
 
 func TestAllowed(t *testing.T) {
-	allowHosts := []string{"good"}
+	good := []string{"good"}
 	key := [][]byte{
 		[]byte("c0ffee"),
 	}
@@ -104,8 +110,11 @@ func TestAllowed(t *testing.T) {
 		return req
 	}
 
+	now := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		url        string
+		now        time.Time
 		options    Options
 		allowHosts []string
 		denyHosts  []string
@@ -115,38 +124,43 @@ func TestAllowed(t *testing.T) {
 		allowed    bool
 	}{
 		// no allowHosts or signature key
-		{"http://test/image", emptyOptions, nil, nil, nil, nil, nil, true},
+		{url: "http://test/image", allowed: true},
 
 		// allowHosts
-		{"http://good/image", emptyOptions, allowHosts, nil, nil, nil, nil, true},
-		{"http://bad/image", emptyOptions, allowHosts, nil, nil, nil, nil, false},
+		{url: "http://good/image", allowHosts: good, allowed: true},
+		{url: "http://bad/image", allowHosts: good, allowed: false},
 
 		// referrer
-		{"http://test/image", emptyOptions, nil, nil, allowHosts, nil, genRequest(map[string]string{"Referer": "http://good/foo"}), true},
-		{"http://test/image", emptyOptions, nil, nil, allowHosts, nil, genRequest(map[string]string{"Referer": "http://bad/foo"}), false},
-		{"http://test/image", emptyOptions, nil, nil, allowHosts, nil, genRequest(map[string]string{"Referer": "MALFORMED!!"}), false},
-		{"http://test/image", emptyOptions, nil, nil, allowHosts, nil, genRequest(map[string]string{}), false},
+		{url: "http://test/image", referrers: good, request: genRequest(map[string]string{"Referer": "http://good/foo"}), allowed: true},
+		{url: "http://test/image", referrers: good, request: genRequest(map[string]string{"Referer": "http://bad/foo"}), allowed: false},
+		{url: "http://test/image", referrers: good, request: genRequest(map[string]string{"Referer": "MALFORMED!!"}), allowed: false},
+		{url: "http://test/image", referrers: good, request: genRequest(map[string]string{}), allowed: false},
 
 		// signature key
-		{"http://test/image", Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ="}, nil, nil, nil, key, nil, true},
-		{"http://test/image", Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ="}, nil, nil, nil, multipleKey, nil, true}, // signed with key "c0ffee"
-		{"http://test/image", Options{Signature: "FWIawYV4SEyI4zKJMeGugM-eJM1eI_jXPEQ20ZgRe4A="}, nil, nil, nil, multipleKey, nil, true}, // signed with key "beer"
-		{"http://test/image", Options{Signature: "deadbeef"}, nil, nil, nil, key, nil, false},
-		{"http://test/image", Options{Signature: "deadbeef"}, nil, nil, nil, multipleKey, nil, false},
-		{"http://test/image", emptyOptions, nil, nil, nil, key, nil, false},
+		{url: "http://test/image", options: Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ="}, keys: key, allowed: true},
+		{url: "http://test/image", options: Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ="}, keys: multipleKey, allowed: true}, // signed with key "c0ffee"
+		{url: "http://test/image", options: Options{Signature: "FWIawYV4SEyI4zKJMeGugM-eJM1eI_jXPEQ20ZgRe4A="}, keys: multipleKey, allowed: true}, // signed with key "beer"
+		{url: "http://test/image", options: Options{Signature: "deadbeef"}, keys: key, allowed: false},
+		{url: "http://test/image", options: Options{Signature: "deadbeef"}, keys: multipleKey, allowed: false},
+		{url: "http://test/image", keys: key, allowed: false},
 
 		// allowHosts and signature
-		{"http://good/image", emptyOptions, allowHosts, nil, nil, key, nil, true},
-		{"http://bad/image", Options{Signature: "gWivrPhXBbsYEwpmWAKjbJEiAEgZwbXbltg95O2tgNI="}, nil, nil, nil, key, nil, true},
-		{"http://bad/image", emptyOptions, allowHosts, nil, nil, key, nil, false},
+		{url: "http://good/image", allowHosts: good, keys: key, allowed: true},
+		{url: "http://bad/image", options: Options{Signature: "gWivrPhXBbsYEwpmWAKjbJEiAEgZwbXbltg95O2tgNI="}, keys: key, allowed: true},
+		{url: "http://bad/image", allowHosts: good, keys: key, allowed: false},
 
 		// deny requests that match denyHosts, even if signature is valid or also matches allowHosts
-		{"http://test/image", emptyOptions, nil, []string{"test"}, nil, nil, nil, false},
-		{"http://test:3000/image", emptyOptions, nil, []string{"test"}, nil, nil, nil, false},
-		{"http://test/image", emptyOptions, []string{"test"}, []string{"test"}, nil, nil, nil, false},
-		{"http://test/image", Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ="}, nil, []string{"test"}, nil, key, nil, false},
-		{"http://127.0.0.1/image", emptyOptions, nil, []string{"127.0.0.0/8"}, nil, nil, nil, false},
-		{"http://127.0.0.1:3000/image", emptyOptions, nil, []string{"127.0.0.0/8"}, nil, nil, nil, false},
+		{url: "http://test/image", denyHosts: []string{"test"}, allowed: false},
+		{url: "http://test:3000/image", denyHosts: []string{"test"}, allowed: false},
+		{url: "http://test/image", allowHosts: []string{"test"}, denyHosts: []string{"test"}, allowed: false},
+		{url: "http://test/image", options: Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ="}, denyHosts: []string{"test"}, keys: key, allowed: false},
+		{url: "http://127.0.0.1/image", denyHosts: []string{"127.0.0.0/8"}, allowed: false},
+		{url: "http://127.0.0.1:3000/image", denyHosts: []string{"127.0.0.0/8"}, allowed: false},
+
+		// valid until options
+		{url: "http://test/image", now: now, options: Options{ValidUntil: now.Add(time.Second)}, allowed: true},
+		{url: "http://test/image", now: now, options: Options{ValidUntil: now.Add(-time.Second)}, allowed: false},
+		{url: "http://test/image", now: now, options: Options{ValidUntil: now}, allowed: false},
 	}
 
 	for _, tt := range tests {
@@ -155,6 +169,7 @@ func TestAllowed(t *testing.T) {
 		p.DenyHosts = tt.denyHosts
 		p.SignatureKeys = tt.keys
 		p.Referrers = tt.referrers
+		p.timeNow = tt.now
 
 		u, err := url.Parse(tt.url)
 		if err != nil {
@@ -330,9 +345,11 @@ func TestShould304(t *testing.T) {
 
 // testTransport is an http.RoundTripper that returns certained canned
 // responses for particular requests.
-type testTransport struct{}
+type testTransport struct {
+	replyNotModified bool
+}
 
-func (t testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var raw string
 
 	switch req.URL.Path {
@@ -350,6 +367,19 @@ func (t testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		_ = png.Encode(img, m)
 
 		raw = fmt.Sprintf("HTTP/1.1 200 OK\nContent-Length: %d\nContent-Type: image/png\n\n%s", len(img.Bytes()), img.Bytes())
+	case "/redirect-to-notmodified":
+		parts := []string{
+			"HTTP/1.1 303\nLocation: http://notmodified.test/notmodified?X-Security-Token=",
+			uuid.NewString(),
+			"#_=_\nCache-Control: no-store\n\n",
+		}
+		raw = strings.Join(parts, "")
+	case "/notmodified":
+		if t.replyNotModified {
+			raw = "HTTP/1.1 304 Not modified\nEtag: \"abcdef\"\n\n"
+		} else {
+			raw = "HTTP/1.1 200 OK\nEtag: \"abcdef\"\n\nOriginal response\n"
+		}
 	default:
 		redirectRegexp := regexp.MustCompile(`/redirects-(\d+)`)
 		if redirectRegexp.MatchString(req.URL.Path) {
@@ -368,10 +398,163 @@ func (t testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return http.ReadResponse(buf, req)
 }
 
+func TestProxy_UpdateCacheHeaders(t *testing.T) {
+	date := "Mon, 02 Jan 2006 15:04:05 MST"
+	exp := "Mon, 02 Jan 2006 16:04:05 MST"
+
+	tests := []struct {
+		name        string
+		minDuration time.Duration
+		forceCache  bool
+		headers     http.Header
+		want        http.Header
+	}{
+		{
+			name:    "zero",
+			headers: http.Header{},
+			want:    http.Header{},
+		},
+		{
+			name: "no min duration",
+			headers: http.Header{
+				"Date":          {date},
+				"Expires":       {exp},
+				"Cache-Control": {"max-age=600"},
+			},
+			want: http.Header{
+				"Date":          {date},
+				"Expires":       {exp},
+				"Cache-Control": {"max-age=600"},
+			},
+		},
+		{
+			name:        "min duration, no header",
+			minDuration: 30 * time.Second,
+			headers:     http.Header{},
+			want: http.Header{
+				"Cache-Control": {"max-age=30"},
+			},
+		},
+		{
+			name:        "cache control exceeds min duration",
+			minDuration: 30 * time.Second,
+			headers: http.Header{
+				"Cache-Control": {"max-age=600"},
+			},
+			want: http.Header{
+				"Cache-Control": {"max-age=600"},
+			},
+		},
+		{
+			name:        "cache control exceeds min duration, expires",
+			minDuration: 30 * time.Second,
+			headers: http.Header{
+				"Date":          {date},
+				"Expires":       {exp},
+				"Cache-Control": {"max-age=86400"},
+			},
+			want: http.Header{
+				"Date":          {date},
+				"Cache-Control": {"max-age=86400"},
+			},
+		},
+		{
+			name:        "min duration exceeds cache control",
+			minDuration: 1 * time.Hour,
+			headers: http.Header{
+				"Cache-Control": {"max-age=600"},
+			},
+			want: http.Header{
+				"Cache-Control": {"max-age=3600"},
+			},
+		},
+		{
+			name:        "min duration exceeds cache control, expires",
+			minDuration: 2 * time.Hour,
+			headers: http.Header{
+				"Date":          {date},
+				"Expires":       {exp},
+				"Cache-Control": {"max-age=600"},
+			},
+			want: http.Header{
+				"Date":          {date},
+				"Cache-Control": {"max-age=7200"},
+			},
+		},
+		{
+			name:        "expires exceeds min duration, cache control",
+			minDuration: 30 * time.Minute,
+			headers: http.Header{
+				"Date":          {date},
+				"Expires":       {exp},
+				"Cache-Control": {"max-age=600"},
+			},
+			want: http.Header{
+				"Date":          {date},
+				"Cache-Control": {"max-age=3600"},
+			},
+		},
+		{
+			name: "respect no-store",
+			headers: http.Header{
+				"Cache-Control": {"max-age=600, no-store"},
+			},
+			want: http.Header{
+				"Cache-Control": {"max-age=600, no-store"},
+			},
+		},
+		{
+			name: "respect private",
+			headers: http.Header{
+				"Cache-Control": {"max-age=600, private"},
+			},
+			want: http.Header{
+				"Cache-Control": {"max-age=600, no-store, private"},
+			},
+		},
+		{
+			name:       "force cache, normalize directives",
+			forceCache: true,
+			headers: http.Header{
+				"Cache-Control": {"MAX-AGE=600, no-store, private"},
+			},
+			want: http.Header{
+				"Cache-Control": {"max-age=600"},
+			},
+		},
+		{
+			name:        "force cache with min duration",
+			minDuration: 1 * time.Hour,
+			forceCache:  true,
+			headers: http.Header{
+				"Cache-Control": {"max-age=600, private, no-store"},
+			},
+			want: http.Header{
+				"Cache-Control": {"max-age=3600"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Proxy{
+				MinimumCacheDuration: tt.minDuration,
+				ForceCache:           tt.forceCache,
+			}
+			hdr := maps.Clone(tt.headers)
+			p.updateCacheHeaders(hdr)
+
+			if !reflect.DeepEqual(hdr, tt.want) {
+				t.Errorf("updateCacheHeaders(%v) returned %v, want %v", tt.headers, hdr, tt.want)
+			}
+		})
+	}
+}
+
 func TestProxy_ServeHTTP(t *testing.T) {
 	p := &Proxy{
 		Client: &http.Client{
-			Transport: testTransport{},
+			Transport: &testTransport{},
 		},
 		AllowHosts:   []string{"good.test"},
 		ContentTypes: []string{"image/*"},
@@ -409,7 +592,7 @@ func TestProxy_ServeHTTP(t *testing.T) {
 func TestProxy_ServeHTTP_is304(t *testing.T) {
 	p := &Proxy{
 		Client: &http.Client{
-			Transport: testTransport{},
+			Transport: &testTransport{},
 		},
 	}
 
@@ -426,10 +609,57 @@ func TestProxy_ServeHTTP_is304(t *testing.T) {
 	}
 }
 
+func TestProxy_ServeHTTP_cached304(t *testing.T) {
+	cache := lrucache.New(1024*1024*8, 0)
+	client := new(http.Client)
+	tt := testTransport{}
+	client.Transport = &httpcache.Transport{
+		Transport: &TransformingTransport{
+			Transport:     &tt,
+			CachingClient: client,
+		},
+		Cache:               cache,
+		MarkCachedResponses: true,
+	}
+
+	p := &Proxy{
+		Client:          client,
+		FollowRedirects: true,
+	}
+
+	// prime the cache
+	req := httptest.NewRequest("GET", "http://localhost//http://good.test/redirect-to-notmodified", nil)
+	recorder := httptest.NewRecorder()
+	p.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	if got, want := resp.StatusCode, http.StatusOK; got != want {
+		t.Errorf("ServeHTTP(%v) returned status %d, want %d", req, got, want)
+	}
+	if _, found := cache.Get("http://good.test/redirect-to-notmodified#0x0"); !found {
+		t.Errorf("Response to http://good.test/redirect-to-notmodified#0x0 should be cached")
+	}
+
+	// now make the same request again, but this time make sure the server responds with a 304
+	tt.replyNotModified = true
+	req = httptest.NewRequest("GET", "http://localhost//http://good.test/redirect-to-notmodified", nil)
+	recorder = httptest.NewRecorder()
+	p.ServeHTTP(recorder, req)
+
+	resp = recorder.Result()
+	if got, want := resp.StatusCode, http.StatusOK; got != want {
+		t.Errorf("ServeHTTP(%v) returned status %d, want %d", req, got, want)
+	}
+
+	if recorder.Body.String() != "Original response\n" {
+		t.Errorf("Response isn't what we expected: %v", recorder.Body.String())
+	}
+}
+
 func TestProxy_ServeHTTP_maxRedirects(t *testing.T) {
 	p := &Proxy{
 		Client: &http.Client{
-			Transport: testTransport{},
+			Transport: &testTransport{},
 		},
 		FollowRedirects: true,
 	}
@@ -503,8 +733,9 @@ func TestProxy_log_default(t *testing.T) {
 func TestTransformingTransport(t *testing.T) {
 	client := new(http.Client)
 	tr := &TransformingTransport{
-		Transport:     testTransport{},
+		Transport:     &testTransport{},
 		CachingClient: client,
+		limiter:       make(chan struct{}, 1),
 	}
 	client.Transport = tr
 
