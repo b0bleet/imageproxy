@@ -111,8 +111,6 @@ func main() {
 	p.ForceCache = *forceCache
 
 	var ln net.Listener
-	var err error
-
 	if path, ok := strings.CutPrefix(*addr, "unix:"); ok {
 		ln, err = net.Listen("unix", path)
 	} else {
