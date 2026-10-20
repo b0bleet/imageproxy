@@ -1,6 +1,6 @@
 module willnorris.com/go/imageproxy/caddy
 
-go 1.25.0
+go 1.26.10
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.2
