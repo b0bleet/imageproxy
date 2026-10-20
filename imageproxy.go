@@ -96,9 +96,7 @@ type Proxy struct {
 	// requests to the proxied server.
 	PassRequestHeaders []string
 
-	// ForceCache, when true, forces caching of all images, even if the
-	// remote server specifies 'private' or 'no-store' in the cache-control
-	// header.
+	// Storage optionally persists responses in S3 and enables the /file route.
 	Storage *s3cache.Cache
 
 	// PassResponseHeaders identifies HTTP headers to pass from server responses to the proxy client.
@@ -251,6 +249,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) serveFile(w http.ResponseWriter, r *http.Request) {
+	if p.Storage == nil {
+		http.Error(w, "image storage is not configured", http.StatusServiceUnavailable)
+		return
+	}
 	path := strings.TrimPrefix(r.URL.EscapedPath()[1:], "file/")
 	image, ok := p.Storage.GetRaw(path)
 	if !ok {
@@ -323,7 +325,12 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var resp *http.Response
-	if image, ok := p.Storage.Get(req.String()); ok {
+	var image []byte
+	var stored bool
+	if p.Storage != nil {
+		image, stored = p.Storage.Get(req.String())
+	}
+	if stored {
 		b := bytes.NewBuffer(image)
 		resp, err = http.ReadResponse(bufio.NewReader(b), r)
 	} else {
@@ -388,7 +395,9 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		metricRemoteErrors.Inc()
 		return
 	}
-	p.Storage.Set(req.String(), respBytes)
+	if p.Storage != nil {
+		p.Storage.Set(req.String(), respBytes)
+	}
 
 	w.Header().Set("Content-Type", contentType)
 

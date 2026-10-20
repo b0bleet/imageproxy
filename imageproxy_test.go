@@ -565,6 +565,7 @@ func TestProxy_ServeHTTP(t *testing.T) {
 		code int    // expected response status code
 	}{
 		{"/favicon.ico", http.StatusOK},
+		{"/file/test.png", http.StatusServiceUnavailable}, // S3 storage is optional.
 		{"//foo", http.StatusBadRequest},                            // invalid request URL
 		{"/http://bad.test/", http.StatusForbidden},                 // Disallowed host
 		{"/http://good.test/error", http.StatusInternalServerError}, // HTTP protocol error
